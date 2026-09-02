@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+/db
+/pdfs
+IITR-Bot.pem
+/db1
+/pilotDB
+/VECTOR_DB
+/files
