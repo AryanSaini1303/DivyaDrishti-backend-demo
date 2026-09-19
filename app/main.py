@@ -16,7 +16,7 @@ import requests #type: ignore
 from industry_config import INDUSTRIES, DOCS_MAP, META_MAP
 from fastapi import Depends #type: ignore
 import json
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse #type: ignore
 
 nltk.download('punkt')
 
