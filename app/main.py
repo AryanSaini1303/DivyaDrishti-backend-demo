@@ -2,7 +2,7 @@ import boto3 #type: ignore
 from fastapi import FastAPI, Request, File, UploadFile, Request, HTTPException, Header, Query #type: ignore
 from datetime import datetime, timedelta
 from pydantic import BaseModel #type: ignore
-from app.query import get_answer
+from app.query import stream_answer
 from fastapi.middleware.cors import CORSMiddleware #type: ignore
 import os
 import fitz #type: ignore
@@ -13,9 +13,10 @@ import tiktoken #type: ignore
 import nltk #type: ignore 
 from typing import List
 import requests #type: ignore
-from app.query import get_answer
 from industry_config import INDUSTRIES, DOCS_MAP, META_MAP
 from fastapi import Depends #type: ignore
+import json
+from fastapi.responses import StreamingResponse
 
 nltk.download('punkt')
 
@@ -76,14 +77,10 @@ class QueryRequest(BaseModel):
 async def ask_question(req: QueryRequest):
     if req.origin not in INDUSTRIES:
         raise HTTPException(status_code=400, detail=f"Invalid industry: {req.origin}")
-    result = get_answer(req.question, req.conversation, req.origin)
-    return {
-        "answer": result["answer"],
-        "pages": result["pages"],
-        "category": result["category"],
-        "context": result["context_json"],
-        "chart_data": result["chart_data"]
-    }
+    async def event_generator():
+        async for event, data in stream_answer(req.question, req.conversation, req.origin):
+            yield f"event: {event}\ndata: {json.dumps(data)}\n\n"
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.post("/add")
 async def add_main_pdfs(files: List[UploadFile] = File(...), x_origin: str = Depends(validate_origin)):
