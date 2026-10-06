@@ -1,0 +1,59 @@
+franchises(id uuid pk, name text, slug text, city text, state text, pincode text, gstin text, geo_lat float, geo_lng float, is_active bool)
+warehouses(id uuid pk, franchise_id uuid fk, name text, city text, state text, is_active bool)
+brands(id uuid pk, brand_code text, name text, tier text, categories text[], is_active bool)
+products(id uuid pk, name text, category text, description text, base_price numeric, fabric text, brand text, brand_code text, tags text[], is_active bool, is_draft bool, design_number text, created_at timestamptz)
+skus(id uuid pk, product_id uuid fk, sku_code text, colour text, size text, fabric_detail text, price numeric, cost_price numeric, barcode text, weight_gm int, is_active bool)
+product_images(id uuid pk, product_id uuid fk, url text, is_primary bool, colour text)
+product_reviews(id uuid pk, customer_id uuid fk, product_id uuid fk, rating int, comment text)
+wishlists(customer_id uuid fk, product_id uuid fk)
+
+analytics_customers(id uuid pk, full_name text, business_name text, city text, state text, pincode text, segment text, assigned_salesperson_id uuid fk, franchise_id uuid fk, is_active bool, agent_name text)
+analytics_leads(id uuid pk, franchise_id uuid fk, customer_id uuid fk, source text, status text, title text, description text, assigned_to uuid fk, ai_summary text, ai_intent text, ai_urgency text, ttl_status text, expected_value numeric, lost_reason text, closed_at timestamptz, business_name text)  -- status is a native Postgres enum (public.lead_status); use exact = match, never ILIKE or any pattern-matching function. Valid values: enquiry, proposal, negotiation, won, lost, interested, contacted, new
+analytics_users(id uuid pk, franchise_id uuid fk, role text, full_name text, is_active bool, warehouse_id uuid fk, team_leader_id uuid fk, date_of_joining date)  -- role is a native Postgres enum (public.user_role), not plain text; use exact = match, never ILIKE or any pattern-matching function - it will error on an enum type. Valid values: super_admin, franchise_admin, sales_manager, salesperson, inventory_manager, warehouse_staff, procurement_manager, accounts, dispatch_manager, dispatch_staff, field_salesperson, website_admin, it_manager, social_media_manager, social_media_executive
+lead_assignments(id uuid pk, lead_id uuid fk, from_user_id uuid fk, to_user_id uuid fk, assigned_by uuid fk, is_auto bool, created_at timestamptz)
+analytics_leave_requests(id uuid pk, user_id uuid fk, franchise_id uuid fk, from_date date, to_date date, leave_type text, status text, reviewed_by uuid fk, created_at timestamptz)
+analytics_attendance(id uuid pk, user_id uuid fk, franchise_id uuid fk, warehouse_id uuid fk, date date, check_in_at timestamptz, check_out_at timestamptz, status text, working_hours numeric, face_verified bool, is_within_geofence bool, created_at timestamptz)  -- status is one of: present, absent, late, half_day, leave (plain text with a CHECK constraint, not a native enum - ILIKE works, but exact = is preferred). No row is ever created for a day someone didn't check in - a missed day is a MISSING row, not a row with status='absent'. Never compute attendance % as COUNT(attendance rows)/COUNT(attendance rows) - that is always 100%. Use this pattern instead, which generates every expected working day and LEFT JOINs actual attendance onto it so a missing day correctly counts against the person:
+
+  WITH expected_days AS (
+    SELECT u.id AS user_id, u.full_name, d::date AS work_date
+    FROM analytics_users u
+    CROSS JOIN generate_series(CURRENT_DATE - INTERVAL '1 month', CURRENT_DATE - INTERVAL '1 day', '1 day'::interval) AS d
+    WHERE u.is_active = true AND EXTRACT(DOW FROM d) != 0  -- excludes Sundays; adjust to the actual work week if asked
+  )
+  SELECT ed.user_id, ed.full_name, COUNT(a.id) * 100.0 / COUNT(ed.work_date) AS attendance_percentage
+  FROM expected_days ed
+  LEFT JOIN analytics_attendance a ON a.user_id = ed.user_id AND a.date = ed.work_date
+  GROUP BY ed.user_id, ed.full_name  -- group by user_id, not full_name alone: two different active
+  -- employees can share the same full_name, and grouping by name alone silently merges their
+  -- attendance into one blended, meaningless row.
+  ORDER BY attendance_percentage ASC;
+
+analytics_failed_attendance(id uuid pk, user_id uuid fk, warehouse_id uuid fk, failure_reason text, attempted_at timestamptz)  -- failed face-recognition check-in attempts. failure_reason is one of: quality_too_low, no_face_detected, multiple_faces, below_threshold, ambiguous_match, invalid_user_id, invalid_user_location, outside_geofence, invalid_registered_embedding, no_enrolled_faces, matching_failed, missing_franchise_id, franchise_mismatch, already_checked_out, server_error, missing_warehouse_assignment, user_mismatch, checkout_too_soon (plain text with a CHECK constraint, not a native enum). user_id may be null (the attempt couldn't even be matched to a person) - don't assume every row identifies someone.
+
+orders(id uuid pk, franchise_id uuid fk, customer_id uuid fk, lead_id uuid fk, order_number text, status text, subtotal numeric, discount_amount numeric, gst_amount numeric, shipping_amount numeric, total_amount numeric, payment_status text, channel text, refunded_amount numeric, created_at timestamptz)  -- status is one of: pending, confirmed, processing, dispute_pending, shipped, delivered, cancelled, returned (note: "cancelled" with two Ls). payment_status is one of: pending, partial, paid, partially_refunded, refunded. channel is online or offline.
+order_items(id uuid pk, order_id uuid fk, product_id uuid fk, warehouse_id uuid fk, colour text, quantity_requested int, total_pieces int, total_price numeric, gst_amount numeric)
+analytics_payments(id uuid pk, order_id uuid fk, customer_id uuid fk, amount numeric, currency text, status text, method text, created_at timestamptz)
+analytics_order_payments(id uuid pk, order_id uuid fk, amount numeric, method text, status text, recorded_at timestamptz)
+invoices(id uuid pk, order_id uuid fk, franchise_id uuid fk, type text, invoice_number text, invoice_date date, subtotal numeric, gst_amount numeric, total_amount numeric)
+dispatch_disputes(id uuid pk, order_id uuid fk, status text, resolution_note text, refund_amount numeric, created_at timestamptz)
+dispatch_dispute_items(id uuid pk, dispute_id uuid fk, order_item_id uuid fk, product_id uuid fk, sku_id uuid fk, colour text, missing_qty int, reason_note text, refund_amount numeric)
+shipments(id uuid pk, order_id uuid fk, franchise_id uuid fk, status text, has_discrepancy bool, dispatched_at timestamptz)
+shipment_scan_progress(id uuid pk, shipment_id uuid fk, order_item_id uuid fk, sku_id uuid fk, size text, required_qty int, scanned_qty int)
+
+inventory_movements(id uuid pk, sku_id uuid fk, warehouse_id uuid fk, movement_type text, quantity int, reference_type text, created_at timestamptz)  -- append-only ledger, never SUM raw quantities for current stock
+inventory_stock(id uuid pk, sku_id uuid fk, warehouse_id uuid fk, quantity int, reserved_qty int, low_stock_threshold int)  -- use this for "current stock" questions
+
+analytics_vendors(id uuid pk, franchise_id uuid fk, name text, city text, state text, pincode text, is_active bool, min_price numeric, max_price numeric, payment_due_days int, discount_rate numeric)
+purchase_orders(id uuid pk, franchise_id uuid fk, warehouse_id uuid fk, vendor_id uuid fk, po_number text, status text, expected_delivery_date date, payment_status text, payment_due_date date, fully_received_at timestamptz)
+purchase_invoices(id uuid pk, po_id uuid fk, franchise_id uuid fk, vendor_id uuid fk, invoice_number text, invoice_date date, subtotal numeric, discount_amount numeric, gst_amount numeric, total_amount numeric)
+po_items(id uuid pk, po_id uuid fk, product_id uuid fk, product_name text, brand text, category text, procurement_price numeric, selling_price numeric, quantity_ordered int, quantity_received int, status text)
+po_sku_receipts(id uuid pk, po_item_id uuid fk, sku_id uuid fk, quantity_ordered int, quantity_received int, discrepancy_qty int)
+analytics_po_disputes(id uuid pk, po_id uuid fk, po_item_id uuid fk, franchise_id uuid fk, status text, total_missing_qty int, inventory_note text, created_at timestamptz)
+expenses(id uuid pk, franchise_id uuid fk, type text, po_id uuid fk, vendor_id uuid fk, category text, description text, amount numeric, gst_amount numeric, recorded_by uuid fk, created_at timestamptz)
+
+reminders(id uuid pk, user_id uuid fk, lead_id uuid fk, title text, remind_at timestamptz, is_completed bool)
+notifications(id uuid pk, user_id uuid fk, franchise_id uuid fk, type text, title text, is_read bool, created_at timestamptz)
+global_trend_catalog_products(id uuid pk, product_id uuid fk, ranking int)
+
+chat_conversations(id uuid pk, user_a uuid fk, user_b uuid fk, last_read_a timestamptz, last_read_b timestamptz, last_message_at timestamptz, last_message_preview text, created_at timestamptz, updated_at timestamptz)  -- one row per 1-to-1 internal staff conversation, not per direction. user_a is always whichever of the two user ids sorts smaller (user_a < user_b is a DB constraint) - it is NOT "who started the chat" and carries no meaning beyond sort order, so never describe user_a as the sender/initiator or user_b as the recipient. To name both participants, JOIN analytics_users twice (once on user_a, once on user_b). last_message_preview is a denormalized snippet kept in sync by a trigger purely for an inbox-list UI - for the actual message text, query chat_messages instead of trusting this field as complete.
+chat_messages(id uuid pk, conversation_id uuid fk, sender_id uuid fk, recipient_id uuid fk, body text, attachment_path text, attachment_name text, attachment_mime text, attachment_size bigint, created_at timestamptz)  -- 1-to-1 internal staff direct messages. Permanent history: there is no edit or delete in this product, so every row that was ever sent still exists exactly as sent. body can be null when the message is attachment-only; every row has a non-empty body and/or an attachment, never neither. attachment_path is a private Supabase Storage path, not a usable URL - don't present it as a link or guess at file contents from it; attachment_name/attachment_mime/attachment_size are the only attachment detail available. recipient_id is denormalized (it's always just "the other user in conversation_id") to support a realtime subscription filter - resolve both sender_id and recipient_id to analytics_users.full_name as usual, same as any other *_id column. "Unread" is not a column on either table - a given message counts as unread for a user when its created_at is later than that user's own last_read_a/last_read_b (whichever side of chat_conversations they are) on the parent conversation row.

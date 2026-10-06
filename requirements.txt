@@ -1,5 +1,5 @@
 fastapi
-uvicorn
+uvicorn[standard]
 openai
 chromadb
 python-dotenv
@@ -9,3 +9,4 @@ nltk
 python-multipart
 azure-storage-blob
 boto3
+asyncpg
