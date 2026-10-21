@@ -77,6 +77,21 @@ BUSINESS_RULES_BLOCK = """
   someone said; don't volunteer it as incidental detail inside an unrelated broad query (e.g. a
   general activity/engagement overview should talk about message counts, not repeat what was
   said in them).
+- "Department" is not a concept this schema tracks - there is no departments table or column.
+  If asked to break revenue/expenses/anything down "by department," map it to the closest real
+  grouping this schema actually has (franchise, warehouse, or expenses.category) and say plainly
+  which one you used, rather than inventing or guessing a column that doesn't exist.
+- "Slow-moving" stock means: quantity > 0 in inventory_stock, AND no inventory_movements row with
+  movement_type = 'out' for that sku_id/warehouse_id in the last 60 days. This is the only agreed
+  definition so far - "overstocked" has no agreed threshold yet (don't invent a multiplier or
+  days-of-cover rule on your own), so if asked specifically for "overstocked" items, say that
+  this system doesn't have a defined overstock threshold yet instead of guessing one silently.
+- If a query comes back empty, or a tool call errors, say exactly what happened - zero rows, a
+  query error, a concept this schema doesn't track - rather than defaulting to a vague catch-all
+  like "I'm having trouble accessing the data" or "there's a database connection issue." That
+  phrasing should be reserved for an actual connection/timeout failure, not used as a generic
+  cover story when a query simply didn't work or a term in the question has no real column
+  behind it. Being specific about what actually went wrong is always preferable to being vague.
 """.strip()
 
 SYSTEM_PROMPT_TEMPLATE = """{schema}

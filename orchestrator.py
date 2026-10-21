@@ -24,12 +24,31 @@ Instructions:
 - Never fabricate numbers. Only use figures explicitly present in the data.
 - If a single query's result already contains a clean comparable series (a time trend or
   category breakdown across multiple rows), chart that directly.
+- CRITICAL - which axis is which: "labels" are the x-axis categories, one per row of the
+  underlying data (e.g. one per SKU, one per date, one per franchise). "series" are the numeric
+  columns/metrics being measured, one series per metric - NOT one series per row. A result with
+  24 SKUs and a capital-tied-up figure for each becomes labels: ["SKU-A","SKU-B",...] (24 items)
+  with ONE series named "Capital Tied Up" holding 24 numbers - never 24 separate series (one per
+  SKU) plotted against two generic category labels like ["SKU","Capital Tied Up"]. If you find
+  yourself about to name a series after a row's own identifier (a SKU code, a customer name, a
+  date) rather than after a metric, that's the signal you have labels and series backwards - stop
+  and swap them. A result can have many rows and still be one series; it only becomes multiple
+  series when there are genuinely multiple numeric metrics per row (e.g. both "ordered_qty" and
+  "received_qty" per SKU).
 - If there are multiple queries and each produced just one summary figure (a single row), and
   comparing those figures together would give a useful overview (e.g. "11 disputes" vs
   "10 shipments"), combine them into one chart - one bar per query, labeled by what that
   number represents. This is the normal, expected shape for an "overview" or "summary"
   question that touches several tables or metrics at once; do not null this out just because
   no single query alone had multiple rows.
+- Only combine figures this way when they share the same unit and a comparable scale (e.g. all
+  are plain counts, or all are the same currency in a similar range). Never combine a currency
+  total with a raw count, a percentage, or a currency total of a very different magnitude onto
+  one chart - one bar dwarfing the others makes the chart unreadable and the comparison
+  meaningless. If the available summary figures don't share a common unit/scale, either chart
+  only the subset that does, or return chart_data: null rather than forcing an incoherent mix.
+- Keep labels short (one or two words: "Sales", "Discount", "Orders") rather than verbatim
+  column or field names - long labels get truncated illegibly on a chart axis.
 - Only return chart_data: null when there is truly nothing comparable - a single isolated
   figure with nothing else alongside it, or purely textual/non-numeric information.
 - chart_type is "bar", "line", or "pie". Prefer "bar" for a small number of distinct
@@ -69,12 +88,18 @@ async def stream_answer(question: str, history: list, origin: str):
 
         sql_results = []
 
-        for _ in range(2):
+        # 3 rounds, not 2: a genuinely compound question (e.g. "which SKUs are
+        # slow-moving" - pull current stock, then pull movement history, then
+        # maybe a follow-up on a narrower set) routinely needs a 3rd hop. At 2,
+        # a legitimate multi-step query and a model that's actually stuck look
+        # identical from here - both just run out of rounds.
+        for _ in range(3):
             decision = await client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=messages,
                 tools=TOOLS,
                 tool_choice="auto",
+                temperature=0.1,
             )
             msg = decision.choices[0].message
 
@@ -114,11 +139,29 @@ async def stream_answer(question: str, history: list, origin: str):
                 ]
             yield ("meta", meta)
 
-        # Only reached if the loop used up both tool rounds and the model
+        # Only reached if the loop used up every tool round and the model
         # still wanted to call more tools - force a final answer from
         # whatever's been gathered so far, with no tool access left.
+        #
+        # Without this nudge, a model asked to produce prose from an
+        # incomplete/empty result set tends to reach for the vaguest
+        # plausible-sounding excuse it can construct ("there seems to be a
+        # database connection issue") instead of being accurate about what
+        # actually happened. Telling it directly that it's out of tool budget
+        # - not that something broke - heads that off.
+        messages.append({
+            "role": "system",
+            "content": (
+                "You have used your available tool-call rounds for this turn and cannot query "
+                "anything further. Answer using only what the tool results above actually show. "
+                "If that isn't enough to answer the question, say plainly what you do have, what "
+                "you don't, and why (e.g. empty result, a query error, or a concept this schema "
+                "doesn't track) - do not claim a database or connection problem unless a tool "
+                "result above actually shows one."
+            ),
+        })
         chart_task = asyncio.create_task(extract_chart_data(question, sql_results))
-        stream = await client.chat.completions.create(model="gpt-4.1-mini", messages=messages, stream=True)
+        stream = await client.chat.completions.create(model="gpt-4.1-mini", messages=messages, stream=True, temperature=0.2)
         async for chunk in stream:
             delta = chunk.choices[0].delta.content
             if delta:

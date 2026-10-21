@@ -40,7 +40,7 @@ dispatch_dispute_items(id uuid pk, dispute_id uuid fk, order_item_id uuid fk, pr
 shipments(id uuid pk, order_id uuid fk, franchise_id uuid fk, status text, has_discrepancy bool, dispatched_at timestamptz)
 shipment_scan_progress(id uuid pk, shipment_id uuid fk, order_item_id uuid fk, sku_id uuid fk, size text, required_qty int, scanned_qty int)
 
-inventory_movements(id uuid pk, sku_id uuid fk, warehouse_id uuid fk, movement_type text, quantity int, reference_type text, created_at timestamptz)  -- append-only ledger, never SUM raw quantities for current stock
+inventory_movements(id uuid pk, sku_id uuid fk, warehouse_id uuid fk, movement_type text, quantity int, reference_type text, created_at timestamptz)  -- append-only ledger, never SUM raw quantities for current stock. movement_type is one of: in, out, adjustment, transfer, return (plain text with a CHECK constraint, not a native enum). quantity's sign follows direction - positive for 'in', negative for 'out' - so filtering movement_type = 'out' is the reliable way to find outbound activity, not quantity < 0 alone (adjustment/transfer/return rows can also be negative for unrelated reasons). reference_type is a free-text label of what caused the movement (order, procurement, adjustment, cart_expiry, warehouse_transfer, manual_adjustment, etc.) - not a fixed enum, don't validate against a closed list.
 inventory_stock(id uuid pk, sku_id uuid fk, warehouse_id uuid fk, quantity int, reserved_qty int, low_stock_threshold int)  -- use this for "current stock" questions
 
 analytics_vendors(id uuid pk, franchise_id uuid fk, name text, city text, state text, pincode text, is_active bool, min_price numeric, max_price numeric, payment_due_days int, discount_rate numeric)
