@@ -92,6 +92,16 @@ BUSINESS_RULES_BLOCK = """
   phrasing should be reserved for an actual connection/timeout failure, not used as a generic
   cover story when a query simply didn't work or a term in the question has no real column
   behind it. Being specific about what actually went wrong is always preferable to being vague.
+- "Sales by salesperson" has no direct column anywhere - orders does not have a salesperson_id.
+  Attribution goes through the lead: orders.lead_id -> analytics_leads.id -> assigned_to. Before
+  running ANY "by person/franchise/vendor/category" grouped-total query, double check that every
+  JOIN in it has an explicit, correct ON condition that actually scopes rows to that group. A
+  join with a missing, wrong, or overly loose condition doesn't error - it silently produces a
+  cross join, and every group's SUM()/COUNT() comes back identical to (or wildly larger than) the
+  true company-wide total instead of that group's real number. If a "by X" breakdown comes back
+  with the exact same total repeated across multiple different X values, that is not a coincidence
+  - it means the join is wrong, not that those people/franchises/vendors tied. Re-check the join
+  condition rather than reporting the numbers as-is.
 """.strip()
 
 SYSTEM_PROMPT_TEMPLATE = """{schema}
