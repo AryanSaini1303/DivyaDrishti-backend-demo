@@ -47,6 +47,18 @@ Instructions:
   one chart - one bar dwarfing the others makes the chart unreadable and the comparison
   meaningless. If the available summary figures don't share a common unit/scale, either chart
   only the subset that does, or return chart_data: null rather than forcing an incoherent mix.
+- The same scale-mismatch problem applies to multiple REAL per-row series too (e.g. attendance
+  percentage, which runs 0-100, plotted alongside a sales count, which might run 0-10) - not
+  just to combining separate single-figure queries. If two series in the same chart have very
+  different value ranges (roughly 5x or more apart in their max values), plotting them as raw
+  bars on one linear axis makes the smaller series collapse to invisible slivers near zero,
+  which silently hides exactly the pattern the chart was supposed to show. When this happens,
+  normalize each affected series independently to a 0-100 "percent of that series' own maximum"
+  scale before combining them, so both are visible and their shapes remain comparable - and
+  rename the axis/series labels to make clear these are now relative (e.g. "Attendance (% of
+  max)", "Sales (% of max)"), not the original absolute units. The exact original absolute
+  numbers are already covered in the spoken answer alongside the chart - the chart's job here is
+  showing the pattern/correlation shape, not re-stating precise figures.
 - Keep labels short (one or two words: "Sales", "Discount", "Orders") rather than verbatim
   column or field names - long labels get truncated illegibly on a chart axis.
 - Only return chart_data: null when there is truly nothing comparable - a single isolated
@@ -85,24 +97,16 @@ async def stream_answer(question: str, history: list, origin: str):
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
         messages += history[-6:]
         messages.append({"role": "user", "content": question})
-
         sql_results = []
-
-        # 3 rounds, not 2: a genuinely compound question (e.g. "which SKUs are
-        # slow-moving" - pull current stock, then pull movement history, then
-        # maybe a follow-up on a narrower set) routinely needs a 3rd hop. At 2,
-        # a legitimate multi-step query and a model that's actually stuck look
-        # identical from here - both just run out of rounds.
-        for _ in range(3):
+        for _ in range(5):
             decision = await client.chat.completions.create(
-                model="gpt-4o-mini",
+                model="gpt-4.1",
                 messages=messages,
                 tools=TOOLS,
                 tool_choice="auto",
                 temperature=0.1,
             )
             msg = decision.choices[0].message
-
             if not msg.tool_calls:
                 chart_task = asyncio.create_task(extract_chart_data(question, sql_results))
                 if msg.content:
@@ -110,7 +114,6 @@ async def stream_answer(question: str, history: list, origin: str):
                 yield ("chart_data", {"chart_data": await chart_task})
                 yield ("done", {})
                 return
-
             messages.append(msg)
             calls = []
             for tc in msg.tool_calls:
@@ -120,7 +123,6 @@ async def stream_answer(question: str, history: list, origin: str):
                     calls.append(asyncio.sleep(0, result={"error": "malformed tool arguments"}))
                     continue
                 calls.append(run_tool(tc.function.name, args, origin))
-
             results = await asyncio.gather(*calls, return_exceptions=True)
             safe_results = [
                 {"error": str(r)} if isinstance(r, Exception) else r
@@ -130,7 +132,6 @@ async def stream_answer(question: str, history: list, origin: str):
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": json.dumps(result)})
                 if tc.function.name == "query_database" and "error" not in result:
                     sql_results.append(result.get("rows", []))
-
             meta = {"tools_used": [tc.function.name for tc in msg.tool_calls]}
             if DEBUG_TOOL_CALLS:
                 meta["debug"] = [
@@ -138,17 +139,6 @@ async def stream_answer(question: str, history: list, origin: str):
                     for tc, result in zip(msg.tool_calls, safe_results)
                 ]
             yield ("meta", meta)
-
-        # Only reached if the loop used up every tool round and the model
-        # still wanted to call more tools - force a final answer from
-        # whatever's been gathered so far, with no tool access left.
-        #
-        # Without this nudge, a model asked to produce prose from an
-        # incomplete/empty result set tends to reach for the vaguest
-        # plausible-sounding excuse it can construct ("there seems to be a
-        # database connection issue") instead of being accurate about what
-        # actually happened. Telling it directly that it's out of tool budget
-        # - not that something broke - heads that off.
         messages.append({
             "role": "system",
             "content": (
@@ -161,14 +151,13 @@ async def stream_answer(question: str, history: list, origin: str):
             ),
         })
         chart_task = asyncio.create_task(extract_chart_data(question, sql_results))
-        stream = await client.chat.completions.create(model="gpt-4.1-mini", messages=messages, stream=True, temperature=0.2)
+        stream = await client.chat.completions.create(model="gpt-4.1", messages=messages, stream=True, temperature=0.2)
         async for chunk in stream:
             delta = chunk.choices[0].delta.content
             if delta:
                 yield ("token", {"text": delta})
         yield ("chart_data", {"chart_data": await chart_task})
         yield ("done", {})
-
     except Exception as e:
         traceback.print_exc()
         yield ("error", {"message": str(e)})

@@ -5,6 +5,32 @@ BUSINESS_RULES_BLOCK = """
 - All monetary values are in INR
 - "franchise" and "store" mean the same thing to users
 - is_active = false rows are soft-deleted; exclude unless explicitly asked for inactive/deleted
+- "This table has no direct column/link for that" is almost never the right place to stop. This
+  schema is deliberately normalized - most real-world questions need 2 or 3 joins through
+  tables that sit BETWEEN the thing you're starting from and the thing you actually want, not
+  one direct column. Before concluding something "isn't available" or "has no direct link,"
+  walk the foreign keys one hop further and check again. Worked example: "which vendor has the
+  most po disputes" - analytics_po_disputes has no vendor_id column, but it has po_id, and
+  purchase_orders (which po_id points to) has vendor_id. So: analytics_po_disputes.po_id ->
+  purchase_orders.id -> purchase_orders.vendor_id -> analytics_vendors.id. That's a completely
+  normal 3-table join for this schema, not a special case or a workaround - treat any
+  "no direct link" conclusion as a sign to check one more table before answering, not as the
+  final answer. The same applies to getting a monetary total: if the table you're on doesn't
+  have a total/amount column, check whether a related line-items table does and SUM across it
+  (see purchase_orders/po_items below) rather than reporting the figure as unavailable.
+  Two more worked examples of the same pattern, deliberately different in shape so this reads
+  as a general habit rather than a rule about disputes/POs specifically:
+    * "Which product categories have the highest customer-dispute rate" - there's no rate column
+      anywhere. Build it: dispatch_dispute_items.product_id -> products.category gives the
+      numerator (disputed order_items per category); order_items.product_id -> products.category
+      gives the denominator (all order_items per category); divide the two, grouped by category.
+      A "rate" or "percentage" question almost always means build a numerator query and a
+      denominator query yourself, not that the schema has the rate pre-computed somewhere.
+    * "Total value of stock currently sitting in warehouse X" - inventory_stock has quantity but
+      no price; skus has price but no warehouse. Join inventory_stock.sku_id -> skus.id and SUM
+      quantity * price, filtered to that warehouse_id. A missing value column on the table with
+      the quantity you need is routine, not a dead end - the price almost always lives one join
+      away on the identifying table (skus, products) instead.
 - Never alias a table with a reserved SQL keyword (e.g. "is", "as", "on", "in", "to", "by") -
   it breaks the query with a syntax error at the next "." and gives no clear signal why.
   Use a descriptive alias instead, e.g. alias inventory_stock as "stk" or "inv_stock", not "is".
@@ -92,6 +118,12 @@ BUSINESS_RULES_BLOCK = """
   phrasing should be reserved for an actual connection/timeout failure, not used as a generic
   cover story when a query simply didn't work or a term in the question has no real column
   behind it. Being specific about what actually went wrong is always preferable to being vague.
+- purchase_orders has no total_amount/subtotal column of its own - that is correct and expected,
+  not a gap to apologize for. A PO's monetary value is derived by summing its line items:
+  SUM(po_items.procurement_price * po_items.quantity_ordered) for the ordered value, or
+  SUM(procurement_price * quantity_received) for the value actually received so far. This is
+  the normal, intended way to get a PO's value in this schema - always try it before reporting
+  that a PO's value is unavailable.
 - "Sales by salesperson" has no direct column anywhere - orders does not have a salesperson_id.
   Attribution goes through the lead: orders.lead_id -> analytics_leads.id -> assigned_to. Before
   running ANY "by person/franchise/vendor/category" grouped-total query, double check that every
