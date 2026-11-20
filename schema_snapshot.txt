@@ -130,3 +130,71 @@ actually query.)
 - dispatch_disputes (customer-facing, order-level) and analytics_po_disputes (vendor-facing, procurement-level) are two unrelated dispute workflows that happen to sound similar - don't merge them into one "disputes" concept without checking which one a question is actually about.
 - analytics_payments (online gateway lifecycle: created/authorized/captured/failed/refunded) and analytics_order_payments (manually recorded offline payment: received/cleared/bounced) are two unrelated payment-tracking tables for the same order - check which one a "has this been paid" question actually needs; they are not interchangeable and a given order row may only exist in one of them.
 - "Department" is not a concept this schema tracks - there is no departments table or column. If asked to break revenue/expenses/anything down "by department," map it to the closest real grouping this schema actually has (franchise, warehouse, or expenses.category) and say plainly which one you used, rather than inventing or guessing a column that doesn't exist.
+
+-- SALES / ORDERS  (append) ----------------------------------------------
+
+garment_returns(id uuid pk, gr_number text, order_id uuid fk, franchise_id uuid fk, customer_id uuid fk -> analytics_customers.id, status text, notes text, created_by uuid fk -> analytics_users.id, created_at timestamptz, reviewed_by uuid fk -> analytics_users.id, reviewed_at timestamptz, updated_at timestamptz)
+  -- A "GR" = a customer sending garments back after delivery. Only DELIVERED orders can have one. status is one of: pending_review, reviewed. gr_number looks like WEB-GR-2026-00001 / WI-GR-2026-00001 (WEB = online order, WI = walk-in/offline) and is unique per franchise, not globally.
+
+garment_return_items(id uuid pk, gr_id uuid fk -> garment_returns.id, order_item_id uuid fk, sku_id uuid fk, warehouse_id uuid fk, quantity int, unit_amount numeric, line_amount numeric, resolution text, verdict text, verdict_by uuid fk -> analytics_users.id, verdict_at timestamptz, debit_note_item_id uuid fk -> debit_note_items.id, created_at timestamptz)
+  -- One row per returned SKU line. resolution is one of: credit (customer gets a credit note), replaced (a replacement piece was sent out immediately). verdict is one of: pending, good (piece went back into stock), defective (charged back to the vendor through a debit note). unit_amount is what the customer actually paid per piece (whole rupees for GRs created after v1.67). "Return rate" = SUM(quantity) here / SUM(order_items.total_pieces) for the same scope.
+
+credit_notes(id uuid pk, cn_number text, gr_id uuid fk -> garment_returns.id, dispatch_dispute_id uuid fk -> dispatch_disputes.id, franchise_id uuid fk, customer_id uuid fk -> analytics_customers.id, amount numeric, paid_out_amount numeric, status text, applied_order_id uuid fk -> orders.id, applied_amount numeric, applied_at timestamptz, applied_by uuid fk -> analytics_users.id, created_by uuid fk -> analytics_users.id, created_at timestamptz, updated_at timestamptz)
+  -- Money Jhaskcom owes a customer. Exactly one source: gr_id (a garment return) OR dispatch_dispute_id (pieces approved as missing at dispatch) - never both. status is one of: open, part_paid, applied, paid_out. A note is settled either by bank payout (paid_out_amount, see analytics_credit_note_payouts) or by applying it to a later order (applied_order_id/applied_amount, which also creates an analytics_order_payments row with method = 'credit_note'). Outstanding customer credit = amount - paid_out_amount - COALESCE(applied_amount, 0) for status IN ('open','part_paid').
+
+analytics_credit_note_payouts(id uuid pk, credit_note_id uuid fk -> credit_notes.id, amount numeric, paid_at date, recorded_by uuid fk -> analytics_users.id, created_at timestamptz)
+  -- Bank-transfer payouts against a credit note (refund paid in cash to the customer).
+
+-- PROCUREMENT  (append) ---------------------------------------------------
+
+debit_notes(id uuid pk, dn_number text, gr_id uuid fk -> garment_returns.id, po_dispute_id uuid fk -> analytics_po_disputes.id, vendor_id uuid fk -> analytics_vendors.id, franchise_id uuid fk, amount numeric, replaced_amount numeric, status text, applied_po_id uuid fk -> purchase_orders.id, applied_amount numeric, applied_at timestamptz, applied_by uuid fk -> analytics_users.id, created_by uuid fk -> analytics_users.id, created_at timestamptz, updated_at timestamptz)
+  -- Money a VENDOR owes Jhaskcom. Exactly one source: gr_id (customer returned defective pieces) OR po_dispute_id (vendor short-delivered on a PO). status is one of: open, part_replaced, applied, settled_by_replacement. Settled either by the vendor sending replacement pieces (replaced_amount) or by deducting it from a later PO (applied_po_id/applied_amount). Amounts are vendor cost incl. 5% GST, not selling price. "Which vendor has the most defects/chargebacks" = group debit_notes by vendor_id - this is a direct column here, no 3-hop join needed.
+
+debit_note_items(id uuid pk, debit_note_id uuid fk -> debit_notes.id, gr_item_id uuid fk -> garment_return_items.id, sku_id uuid fk, warehouse_id uuid fk, quantity int, unit_amount numeric, line_amount numeric, replaced_quantity int, replacement_received_at timestamptz, replacement_received_by uuid fk -> analytics_users.id, created_at timestamptz)
+  -- gr_item_id is null for lines that came from a PO dispute. replaced_quantity < quantity means the vendor still owes pieces.
+
+-- INVENTORY  (append) ------------------------------------------------------
+
+stock_transfers(id uuid pk, transfer_number text, franchise_id uuid fk, from_warehouse_id uuid fk -> warehouses.id, to_warehouse_id uuid fk -> warehouses.id, total_skus int, total_units int, notes text, created_by uuid fk -> analytics_users.id, created_at timestamptz)
+  -- One row per warehouse-to-warehouse stock move. transfer_number looks like TRF-2026-00042. Join warehouses twice (aliased) to name both ends.
+
+stock_transfer_items(id uuid pk, transfer_id uuid fk -> stock_transfers.id, sku_id uuid fk, quantity int, source_qty_before int, source_qty_after int, dest_qty_before int, dest_qty_after int)
+  -- One row per SKU moved, with stock levels at both warehouses before and after.
+
+-- CRM / LEADS  (append) ----------------------------------------------------
+
+analytics_lead_milestones(id uuid pk, lead_id uuid fk -> analytics_leads.id, category text, note text, created_by uuid fk -> analytics_users.id, created_at timestamptz)
+  -- The salesperson's manual timeline for a lead. category is one of: contacted, interested, quotation_sent, negotiation, payment_done, won, lost, follow_up, general_note. Note: category 'interested' exists here even though 'interested' is NOT a valid analytics_leads.status value - don't carry it across. Use this for "how long from first contact to won", "how many follow-ups before closing", "what did the salesperson log on lead X".
+
+=====================================================================
+CORRECTIONS TO EXISTING ENTRIES
+=====================================================================
+
+shipments  - add columns: transporter_name text, awb_number text, builty_path text, builty_file_name text, transit_details_by uuid fk -> analytics_users.id, transit_details_at timestamptz
+  -- transporter_name and awb_number are always both set or both null. builty_path is a private storage path, not a URL - never present it as a link.
+
+analytics_order_payments  - add column credit_note_id uuid fk -> credit_notes.id
+  -- method is one of: cash, cheque, upi, bank_transfer, card_pos, credit_note. A credit_note row is a customer's earlier credit being applied to this order, NOT money received - exclude method = 'credit_note' from any "cash collected" / "money received" total, and say so.
+
+analytics_users  - add column on_hold bool
+  -- on_hold = true salespeople are skipped by automatic lead assignment. "Who can take new leads" = role = 'salesperson' AND is_active AND NOT COALESCE(on_hold, false).
+
+inventory_movements  - replace the reference_type example list with:
+  -- reference_type values include: order (sale / cancellation restore), procurement, warehouse_transfer (reference_id -> stock_transfers.id), garment_return (good piece back into stock, movement_type 'return'), garment_return_replacement (replacement sent to customer, 'out'), debit_note_replacement (vendor replacement received, 'in'), cart_expiry, manual_adjustment, adjustment. Note: 'out' rows with reference_type 'garment_return_replacement' are replacements, not sales - exclude them from "units sold".
+
+dispatch_disputes  - append to comment:
+  -- An approved dispute creates a credit note for the missing pieces (credit_notes.dispatch_dispute_id). refund_amount is that credit total.
+
+analytics_leads  - append to comment:
+  -- E-commerce leads are created automatically when an online order is paid: source = 'website', created straight in status 'payment_done', title starts 'E-commerce order '. WhatsApp leads are stored with source = 'walk_in' (not 'whatsapp') and description starting 'Source: WhatsApp message' - for "leads from WhatsApp" filter on description ILIKE 'Source: WhatsApp message%', and don't count those as real walk-ins.
+  -- Lifecycle: payment_done, won and lost are closed. An order becoming paid moves its lead to payment_done; partial payment moves it to negotiation.
+
+notifications  - append to comment:
+  -- Rows older than 4 days are deleted by a cron job. This table cannot answer anything historical ("how many alerts last month") - say so.
+
+=====================================================================
+BUSINESS RULES (append to BUSINESS_RULES_BLOCK in prompts.py)
+=====================================================================
+
+- Net sales after returns = order revenue minus credit_notes.amount for credit notes whose source is a garment return (gr_id is not null). A credit note from a dispatch dispute is a short-shipment refund, not a return - report the two separately when asked about "returns".
+- "Customer refunds paid" = SUM(analytics_credit_note_payouts.amount). Credit applied to a later order is not a refund paid out.

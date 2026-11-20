@@ -9,3 +9,5 @@ IITR-Bot.pem
 /pilotDB
 /VECTOR_DB
 /files
+venv/
+venv.old/
