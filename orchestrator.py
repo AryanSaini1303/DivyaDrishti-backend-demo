@@ -5,6 +5,7 @@ import traceback
 from openai import AsyncOpenAI
 from schema import build_system_prompt
 from tools import TOOLS, run_tool
+from visuals import extract_visuals, legacy_chart_data
 
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 SYSTEM_PROMPT = build_system_prompt()
@@ -92,6 +93,16 @@ async def extract_chart_data(question: str, sql_results: list):
         return None
 
 
+async def _visual_events(task):
+    """The answer's cards ("visuals"), then the old single-chart event built from them so a
+    frontend that predates cards still gets its chart."""
+    visuals = await task
+    return [
+        ("visuals", visuals),
+        ("chart_data", {"chart_data": legacy_chart_data(visuals["cards"])}),
+    ]
+
+
 async def stream_answer(question: str, history: list, origin: str):
     try:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -108,10 +119,11 @@ async def stream_answer(question: str, history: list, origin: str):
             )
             msg = decision.choices[0].message
             if not msg.tool_calls:
-                chart_task = asyncio.create_task(extract_chart_data(question, sql_results))
+                visuals_task = asyncio.create_task(extract_visuals(question, sql_results))
                 if msg.content:
                     yield ("token", {"text": msg.content})
-                yield ("chart_data", {"chart_data": await chart_task})
+                for ev in await _visual_events(visuals_task):
+                    yield ev
                 yield ("done", {})
                 return
             messages.append(msg)
@@ -150,13 +162,14 @@ async def stream_answer(question: str, history: list, origin: str):
                 "result above actually shows one."
             ),
         })
-        chart_task = asyncio.create_task(extract_chart_data(question, sql_results))
+        visuals_task = asyncio.create_task(extract_visuals(question, sql_results))
         stream = await client.chat.completions.create(model="gpt-4.1", messages=messages, stream=True, temperature=0.2)
         async for chunk in stream:
             delta = chunk.choices[0].delta.content
             if delta:
                 yield ("token", {"text": delta})
-        yield ("chart_data", {"chart_data": await chart_task})
+        for ev in await _visual_events(visuals_task):
+            yield ev
         yield ("done", {})
     except Exception as e:
         traceback.print_exc()
